@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package
+          path: pesewa-*.tgz
+
+  # Installs the packed tarball on every supported Node version and loads it from ESM and CommonJS
+  compat:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: package
+      - name: Install and import
+        run: |
+          npm init -y > /dev/null
+          npm install ./pesewa-*.tgz
+          node --input-type=module -e "import { Paystack, normalizeGhanaPhone } from 'pesewa'; if (normalizeGhanaPhone('0241234567').e164 !== '+233241234567' || typeof Paystack !== 'function') process.exit(1); console.log('ESM ok')"
+          node -e "const { Moolre, toMajorString } = require('pesewa'); if (toMajorString(1050) !== '10.50' || typeof Moolre !== 'function') process.exit(1); console.log('CJS ok')"
