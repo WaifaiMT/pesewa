@@ -101,7 +101,7 @@ Providers can deliver the same webhook more than once. Make your handling idempo
 | `email` | `string` | Paystack requires one (or set `fallbackEmailDomain`) |
 | `description`, `metadata` | | Passed through where supported |
 
-Returns `{ status, reference, message?, raw }`, where `status` is `pending`, `otp_required`, `success`, or `failed`. Pass `result.reference` to `verify()`. For MTN MoMo it's MTN's request id (a UUID), not your reference.
+Returns `{ status, reference, message?, raw }`, where `status` is `pending`, `otp_required`, `success`, or `failed`. Pass `result.reference` to `verify()`. For MTN MoMo it's MTN's request id (a UUID). **Use a UUID v4 as your reference** (`crypto.randomUUID()`) and pesewa sends it as MTN's request id, so `result.reference` equals your reference. Then a callback that arrives before `collect()` returns still matches a payment you already stored.
 
 ### `verify(reference) → Payment`
 
