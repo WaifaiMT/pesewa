@@ -7,6 +7,7 @@ import type { CollectRequest, CollectResult, MobileMoneyProvider, Payment, Provi
 
 const SANDBOX_URL = "https://sandbox.momodeveloper.mtn.com";
 const REF_PARAM = "pesewa_ref";
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type MtnMomoOptions = ProviderOptions & {
   /** Collections product subscription key (Ocp-Apim-Subscription-Key). */
@@ -77,7 +78,10 @@ export class MtnMomo implements MobileMoneyProvider {
     if (resolveNetwork(req.phone, req.network) !== "mtn") {
       throw new PesewaError("invalid_request", "MTN MoMo can only collect from MTN numbers");
     }
-    const referenceId = randomUUID();
+    // MTN needs a UUID v4 as the X-Reference-Id. Reuse the caller's reference when
+    // it is one, so they know the id before the request is sent: a callback can
+    // arrive before collect() returns, and they'll already have it on record.
+    const referenceId = UUID_V4.test(req.reference) ? req.reference.toLowerCase() : randomUUID();
     const extra: Record<string, string> = { "X-Reference-Id": referenceId };
     if (this.options.callbackUrl) {
       const url = new URL(this.options.callbackUrl);

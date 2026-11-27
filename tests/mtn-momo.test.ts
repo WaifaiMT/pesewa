@@ -32,6 +32,25 @@ describe("MTN MoMo", () => {
     expect(result).toMatchObject({ status: "pending", reference: rtp.headers["X-Reference-Id"] });
   });
 
+  it("uses a UUID v4 reference as the X-Reference-Id, so callers know it before the request", async () => {
+    const { fetch, calls } = mockFetch([tokenRoute, { method: "POST", match: "/requesttopay", reply: { status: 202 } }]);
+    const momo = new MtnMomo({ ...options, fetch, callbackUrl: "https://shop.example/momo/callback" });
+    const reference = "3F2504E0-4F89-41D3-9A0C-0305E82C3301";
+
+    const result = await momo.collect({ amount: 100, phone: "0241234567", reference });
+
+    const rtp = calls.find((c) => c.url.endsWith("/requesttopay"))!;
+    expect(rtp.headers["X-Reference-Id"]).toBe(reference.toLowerCase());
+    expect(rtp.headers["X-Callback-Url"]).toBe(`https://shop.example/momo/callback?pesewa_ref=${reference.toLowerCase()}`);
+    expect(result.reference).toBe(reference.toLowerCase());
+
+    // Anything that isn't a UUID v4 still gets a fresh one
+    await momo.collect({ amount: 100, phone: "0241234567", reference: "3f2504e0-4f89-11d3-9a0c-0305e82c3301" });
+    const second = calls.filter((c) => c.url.endsWith("/requesttopay"))[1];
+    expect(second.headers["X-Reference-Id"]).toMatch(UUID);
+    expect(second.headers["X-Reference-Id"]).not.toBe("3f2504e0-4f89-11d3-9a0c-0305e82c3301");
+  });
+
   it("reuses the access token until it expires", async () => {
     const { fetch, calls } = mockFetch([tokenRoute, { method: "POST", match: "/requesttopay", reply: { status: 202 } }]);
     const momo = new MtnMomo({ ...options, fetch });

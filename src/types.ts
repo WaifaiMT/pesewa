@@ -8,7 +8,11 @@ export type CollectRequest = {
   currency?: string;
   /** The payer's mobile number, in any common Ghana format. */
   phone: string;
-  /** Your unique reference for this payment. Never reuse one. */
+  /**
+   * Your unique reference for this payment. Never reuse one. For MTN MoMo, use a
+   * UUID v4 (e.g. `crypto.randomUUID()`) and it becomes MTN's X-Reference-Id, so
+   * `verify()` and callbacks use the same id you stored.
+   */
   reference: string;
   /** The payer's network. Detected from the number if omitted. */
   network?: Network;
@@ -29,7 +33,7 @@ export type CollectStatus = "pending" | "otp_required" | "success" | "failed";
 export type CollectResult = {
   provider: string;
   status: CollectStatus;
-  /** The id to pass to `verify()`. Your reference for Paystack and Moolre; MTN's X-Reference-Id (a UUID) for MTN MoMo. */
+  /** The id to pass to `verify()`. Your reference for Paystack and Moolre; for MTN MoMo, MTN's X-Reference-Id (your reference if it was a UUID v4, otherwise a new UUID). */
   reference: string;
   message?: string;
   raw: unknown;
