@@ -80,4 +80,78 @@ export interface MobileMoneyProvider {
   handleWebhook(request: WebhookRequest): Promise<Payment | null>;
 }
 
+// ---- Payouts --------------------------------------------------------------
+
+export type PayoutRequest = {
+  /** Integer amount in minor units: 5000 = GHS 50.00. */
+  amount: number;
+  /** ISO currency. Default "GHS". (MTN's sandbox only accepts "EUR".) */
+  currency?: string;
+  /** The recipient's mobile number, in any common Ghana format. */
+  phone: string;
+  /** The recipient's network. Detected from the number if omitted. */
+  network?: Network;
+  /**
+   * Your unique reference for this payout. Never reuse one: it's what stops a
+   * retry from paying twice. Use a UUID v4 (`crypto.randomUUID()`): it meets
+   * Paystack's rules (16–50 characters: lowercase letters, digits, - and _),
+   * and MTN uses it as its own request id.
+   */
+  reference: string;
+  /** The recipient's name, as on their wallet where you know it. */
+  name: string;
+  /** Short narration shown to the recipient where the provider supports it. */
+  reason?: string;
+};
+
+/**
+ * - `pending`: accepted; wait for the webhook or poll `verifyPayout()`
+ * - `success`: the money reached the recipient's wallet
+ * - `failed`: it didn't go out
+ * - `reversed`: it went out, then came back (Paystack reports this for wallets that rejected it)
+ */
+export type PayoutStatus = "pending" | "success" | "failed" | "reversed";
+
+export type PayoutResult = {
+  provider: string;
+  status: PayoutStatus;
+  /** The id to pass to `verifyPayout()`: your reference. */
+  reference: string;
+  message?: string;
+  raw: unknown;
+};
+
+/** A payout's state, as confirmed with the provider's API. */
+export type Payout = {
+  provider: string;
+  reference: string;
+  status: PayoutStatus;
+  /** Minor units, when the provider reports it. */
+  amount?: number;
+  currency?: string;
+  providerTransactionId?: string;
+  failureReason?: string;
+  raw: unknown;
+};
+
+export interface PayoutProvider {
+  readonly name: string;
+  /** Sends money to a mobile money wallet. Safe to retry with the same reference: providers refuse a duplicate. */
+  payout(request: PayoutRequest): Promise<PayoutResult>;
+  /** Asks the provider for the payout's current state. */
+  verifyPayout(reference: string): Promise<Payout>;
+  /**
+   * Authenticates a webhook (where the provider supports it), then confirms
+   * the payout with `verifyPayout()`. Returns null for events that aren't
+   * about a payout, so you can pass every webhook to both handlers.
+   */
+  handlePayoutWebhook(request: WebhookRequest): Promise<Payout | null>;
+}
+
+/** True for providers that can send payouts. */
+export function isPayoutProvider(provider: object): provider is PayoutProvider {
+  const p = provider as Partial<PayoutProvider>;
+  return typeof p.payout === "function" && typeof p.verifyPayout === "function" && typeof p.handlePayoutWebhook === "function";
+}
+
 export type ProviderOptions = HttpOptions;

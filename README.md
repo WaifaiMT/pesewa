@@ -5,6 +5,7 @@
 A typed TypeScript SDK for taking payments in Ghana. **Paystack, Moolre, and MTN MoMo** behind one interface, with webhooks that are authenticated and then confirmed with the provider before you ever see a "success".
 
 - **One interface, three providers:** `collect()`, `submitOtp()`, `verify()`, `handleWebhook()`
+- **Payouts** to mobile money wallets (Paystack Transfers, MTN Disbursement): `payout()`, `verifyPayout()`, `handlePayoutWebhook()`
 - **MTN, Telecel, and AT** mobile money, plus cards through Paystack's hosted checkout
 - **Safe money handling:** amounts are integers in pesewas, never floats
 - **Verified webhooks:** signatures and secrets checked in constant time, then every payment re-confirmed with the provider's API
@@ -87,6 +88,34 @@ app.post("/webhooks/paystack", express.text({ type: "*/*" }), async (req, res) =
 
 Providers can deliver the same webhook more than once. Make your handling idempotent (for example, only mark an order paid if it isn't already).
 
+## Payouts
+
+Paystack and MTN MoMo can also **send** money to a wallet. They implement `PayoutProvider`:
+
+```ts
+import { randomUUID } from "node:crypto";
+import { Paystack, isPayoutProvider } from "pesewa";
+
+const paystack = new Paystack({ secretKey: process.env.PAYSTACK_SECRET_KEY! });
+
+const reference = randomUUID(); // store it BEFORE calling payout()
+const result = await paystack.payout({
+  amount: 25000, // GHS 250.00, in pesewas
+  phone: "024 123 4567",
+  name: "Ama Mensah",
+  reference,
+  reason: "Susu round 1",
+});
+// result.status: "pending" | "success" | "failed" | "reversed"
+// Then wait for the webhook, or poll paystack.verifyPayout(reference)
+```
+
+- **Never pay twice.** Use a **UUID v4** as the reference, save it before you call `payout()`, and retry with the *same* reference. Both providers refuse a repeated reference (`duplicate_reference`), so a retry after a timeout can't send the money again. MTN requires a UUID v4 for exactly this reason.
+- **Webhooks:** pass every webhook to both `handleWebhook()` and `handlePayoutWebhook()`. Each returns `null` for events that aren't its kind. Paystack's `transfer.success`, `transfer.failed`, and `transfer.reversed` are signature-checked and re-verified; MTN payout callbacks carry `pesewa_kind=payout` in the callback URL, then are confirmed with MTN.
+- **Paystack:** turn off **OTP for transfers** in the dashboard, or every transfer waits for an OTP (pesewa throws `unsupported` with that advice). Wallets are registered as transfer recipients once per process. Bank codes default to `MTN`, `VOD`, `ATL` (override with `transferBankCodes`).
+- **MTN MoMo:** payouts use the **Disbursement** product, which has its own subscription key and API user: pass them as `disbursement: { subscriptionKey, apiUser, apiKey }`. MTN numbers only.
+- **Moolre:** payouts aren't supported yet. `isPayoutProvider(provider)` tells you at runtime.
+
 ## API
 
 ### `collect(request) → CollectResult`
@@ -146,7 +175,7 @@ The suite (54 tests) checks the exact requests sent to each provider (URLs, head
 
 ## Roadmap
 
-- Payouts (Paystack transfers, Moolre transfers, MTN Disbursements)
+- Moolre payouts
 - Hubtel provider
 - Retries with backoff for status polling
 
