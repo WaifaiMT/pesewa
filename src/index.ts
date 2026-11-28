@@ -4,6 +4,7 @@ export { detectNetwork, normalizeGhanaPhone, type GhanaPhone, type Network } fro
 export { Moolre, type MoolreOptions } from "./providers/moolre";
 export { MtnMomo, type MtnMomoOptions } from "./providers/mtn-momo";
 export { Paystack, type PaystackOptions } from "./providers/paystack";
+export { isPayoutProvider } from "./types";
 export type {
   CollectRequest,
   CollectResult,
@@ -11,5 +12,10 @@ export type {
   MobileMoneyProvider,
   Payment,
   PaymentStatus,
+  Payout,
+  PayoutProvider,
+  PayoutRequest,
+  PayoutResult,
+  PayoutStatus,
   WebhookRequest,
 } from "./types";

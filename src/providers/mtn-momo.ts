@@ -3,10 +3,25 @@ import { PesewaError } from "../errors";
 import { asRecord, request, type HttpOptions } from "../http";
 import { assertMinorUnits, fromMajor, toMajorString } from "../money";
 import { normalizeGhanaPhone, resolveNetwork } from "../phone";
-import type { CollectRequest, CollectResult, MobileMoneyProvider, Payment, ProviderOptions, WebhookRequest } from "../types";
+import type {
+  CollectRequest,
+  CollectResult,
+  MobileMoneyProvider,
+  Payment,
+  Payout,
+  PayoutProvider,
+  PayoutRequest,
+  PayoutResult,
+  ProviderOptions,
+  WebhookRequest,
+} from "../types";
 
 const SANDBOX_URL = "https://sandbox.momodeveloper.mtn.com";
 const REF_PARAM = "pesewa_ref";
+// Collections and payouts share one callback URL; this marks payout callbacks
+const KIND_PARAM = "pesewa_kind";
+
+type Product = "collection" | "disbursement";
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export type MtnMomoOptions = ProviderOptions & {
@@ -25,6 +40,11 @@ export type MtnMomoOptions = ProviderOptions & {
    * callback host registered for your API user.
    */
   callbackUrl?: string;
+  /**
+   * For payouts: the Disbursement product's own subscription key and API
+   * user. MTN issues these separately from the Collections ones.
+   */
+  disbursement?: { subscriptionKey: string; apiUser: string; apiKey: string };
 };
 
 /**
@@ -32,10 +52,10 @@ export type MtnMomoOptions = ProviderOptions & {
  * `handleWebhook()` treats them only as a signal and confirms every payment
  * with MTN's status endpoint.
  */
-export class MtnMomo implements MobileMoneyProvider {
+export class MtnMomo implements MobileMoneyProvider, PayoutProvider {
   readonly name = "mtn_momo";
   private readonly baseUrl: string;
-  private token: { value: string; expiresAt: number } | null = null;
+  private readonly tokens: Partial<Record<Product, { value: string; expiresAt: number }>> = {};
 
   constructor(private readonly options: MtnMomoOptions) {
     for (const key of ["subscriptionKey", "apiUser", "apiKey", "environment"] as const) {
@@ -44,31 +64,54 @@ export class MtnMomo implements MobileMoneyProvider {
     if (options.environment !== "sandbox" && !options.baseUrl) {
       throw new PesewaError("invalid_request", "MTN MoMo: baseUrl is required outside the sandbox (use the host from your MTN onboarding)");
     }
+    if (options.disbursement) {
+      for (const key of ["subscriptionKey", "apiUser", "apiKey"] as const) {
+        if (!options.disbursement[key]) throw new PesewaError("invalid_request", `MTN MoMo: disbursement.${key} is required`);
+      }
+    }
     this.baseUrl = (options.baseUrl ?? SANDBOX_URL).replace(/\/$/, "");
   }
 
-  /** Gets an access token, reusing it until a minute before it expires. */
-  private async accessToken(): Promise<string> {
-    if (this.token && Date.now() < this.token.expiresAt) return this.token.value;
-    const basic = Buffer.from(`${this.options.apiUser}:${this.options.apiKey}`).toString("base64");
-    const res = await request(this.name, this.options, `${this.baseUrl}/collection/token/`, {
+  private credentials(product: Product): { subscriptionKey: string; apiUser: string; apiKey: string } {
+    if (product === "collection") return this.options;
+    if (!this.options.disbursement) {
+      throw new PesewaError("unsupported", "MTN MoMo: payouts need the Disbursement product; pass `disbursement` keys", { provider: this.name });
+    }
+    return this.options.disbursement;
+  }
+
+  private callback(referenceId: string, kind?: "payout"): string | undefined {
+    if (!this.options.callbackUrl) return undefined;
+    const url = new URL(this.options.callbackUrl);
+    url.searchParams.set(REF_PARAM, referenceId);
+    if (kind) url.searchParams.set(KIND_PARAM, kind);
+    return url.toString();
+  }
+
+  /** Gets an access token for a product, reusing it until a minute before it expires. */
+  private async accessToken(product: Product): Promise<string> {
+    const cached = this.tokens[product];
+    if (cached && Date.now() < cached.expiresAt) return cached.value;
+    const creds = this.credentials(product);
+    const basic = Buffer.from(`${creds.apiUser}:${creds.apiKey}`).toString("base64");
+    const res = await request(this.name, this.options, `${this.baseUrl}/${product}/token/`, {
       method: "POST",
-      headers: { Authorization: `Basic ${basic}`, "Ocp-Apim-Subscription-Key": this.options.subscriptionKey },
+      headers: { Authorization: `Basic ${basic}`, "Ocp-Apim-Subscription-Key": creds.subscriptionKey },
     });
     const data = asRecord(res.data);
     if (res.status !== 200 || typeof data.access_token !== "string") {
       throw new PesewaError("authentication", "MTN MoMo: couldn't get an access token", { provider: this.name, httpStatus: res.status, raw: res.data });
     }
     const ttlSeconds = typeof data.expires_in === "number" ? data.expires_in : 3600;
-    this.token = { value: data.access_token, expiresAt: Date.now() + Math.max(ttlSeconds - 60, 0) * 1000 };
-    return this.token.value;
+    this.tokens[product] = { value: data.access_token, expiresAt: Date.now() + Math.max(ttlSeconds - 60, 0) * 1000 };
+    return data.access_token;
   }
 
-  private async headers(extra: Record<string, string> = {}): Promise<Record<string, string>> {
+  private async headers(product: Product, extra: Record<string, string> = {}): Promise<Record<string, string>> {
     return {
-      Authorization: `Bearer ${await this.accessToken()}`,
+      Authorization: `Bearer ${await this.accessToken(product)}`,
       "X-Target-Environment": this.options.environment,
-      "Ocp-Apim-Subscription-Key": this.options.subscriptionKey,
+      "Ocp-Apim-Subscription-Key": this.credentials(product).subscriptionKey,
       ...extra,
     };
   }
@@ -83,15 +126,12 @@ export class MtnMomo implements MobileMoneyProvider {
     // arrive before collect() returns, and they'll already have it on record.
     const referenceId = UUID_V4.test(req.reference) ? req.reference.toLowerCase() : randomUUID();
     const extra: Record<string, string> = { "X-Reference-Id": referenceId };
-    if (this.options.callbackUrl) {
-      const url = new URL(this.options.callbackUrl);
-      url.searchParams.set(REF_PARAM, referenceId);
-      extra["X-Callback-Url"] = url.toString();
-    }
+    const callbackUrl = this.callback(referenceId);
+    if (callbackUrl) extra["X-Callback-Url"] = callbackUrl;
 
     const res = await request(this.name, this.options, `${this.baseUrl}/collection/v1_0/requesttopay`, {
       method: "POST",
-      headers: await this.headers(extra),
+      headers: await this.headers("collection", extra),
       body: {
         amount: toMajorString(req.amount),
         currency: req.currency ?? "GHS",
@@ -124,7 +164,7 @@ export class MtnMomo implements MobileMoneyProvider {
   async verify(reference: string): Promise<Payment> {
     const res = await request(this.name, this.options, `${this.baseUrl}/collection/v1_0/requesttopay/${encodeURIComponent(reference)}`, {
       method: "GET",
-      headers: await this.headers(),
+      headers: await this.headers("collection"),
     });
     if (res.status === 404) throw new PesewaError("not_found", `MTN MoMo: no request to pay ${reference}`, { provider: this.name, httpStatus: 404 });
     if (res.status !== 200) {
@@ -146,14 +186,100 @@ export class MtnMomo implements MobileMoneyProvider {
     };
   }
 
-  /** Reads the reference from the callback URL and confirms the payment with MTN. */
-  async handleWebhook(req: WebhookRequest): Promise<Payment | null> {
+  private callbackReference(req: WebhookRequest): { reference: string; kind: string | null } {
     if (!req.url) throw new PesewaError("invalid_request", "MTN MoMo: pass the request url to handleWebhook()");
-    const reference = new URL(req.url, "http://localhost").searchParams.get(REF_PARAM);
+    const params = new URL(req.url, "http://localhost").searchParams;
+    const reference = params.get(REF_PARAM);
     if (!reference || !/^[0-9a-f-]{36}$/i.test(reference)) {
       throw new PesewaError("invalid_webhook", `MTN MoMo: callback URL has no valid ${REF_PARAM}`, { provider: this.name });
     }
-    return this.verify(reference);
+    return { reference, kind: params.get(KIND_PARAM) };
+  }
+
+  /** Reads the reference from the callback URL and confirms the payment with MTN. Payout callbacks return null. */
+  async handleWebhook(req: WebhookRequest): Promise<Payment | null> {
+    const { reference, kind } = this.callbackReference(req);
+    return kind === "payout" ? null : this.verify(reference);
+  }
+
+  // ---- Payouts (Disbursement: Transfer) ---------------------------------------
+
+  /**
+   * Sends money to an MTN wallet. The reference must be a UUID v4: it becomes
+   * MTN's X-Reference-Id, so retrying with the same reference can't pay twice
+   * (MTN answers 409 instead).
+   */
+  async payout(req: PayoutRequest): Promise<PayoutResult> {
+    assertMinorUnits(req.amount);
+    if (!UUID_V4.test(req.reference)) {
+      throw new PesewaError("invalid_request", "MTN MoMo: payout references must be a UUID v4, so a retry can't pay twice");
+    }
+    if (resolveNetwork(req.phone, req.network) !== "mtn") {
+      throw new PesewaError("invalid_request", "MTN MoMo can only pay out to MTN numbers");
+    }
+    const referenceId = req.reference.toLowerCase();
+    const extra: Record<string, string> = { "X-Reference-Id": referenceId };
+    const callbackUrl = this.callback(referenceId, "payout");
+    if (callbackUrl) extra["X-Callback-Url"] = callbackUrl;
+
+    const res = await request(this.name, this.options, `${this.baseUrl}/disbursement/v1_0/transfer`, {
+      method: "POST",
+      headers: await this.headers("disbursement", extra),
+      body: {
+        amount: toMajorString(req.amount),
+        currency: req.currency ?? "GHS",
+        externalId: referenceId,
+        payee: { partyIdType: "MSISDN", partyId: normalizeGhanaPhone(req.phone).msisdn },
+        payerMessage: req.reason ?? "",
+        payeeNote: req.reason ?? "",
+      },
+    });
+    if (res.status === 409) {
+      throw new PesewaError("duplicate_reference", "MTN MoMo: duplicate X-Reference-Id", { provider: this.name, httpStatus: 409, raw: res.data });
+    }
+    if (res.status !== 202) {
+      const message = asRecord(res.data).message;
+      throw new PesewaError("provider_error", `MTN MoMo: ${typeof message === "string" ? message : `payout failed (HTTP ${res.status})`}`, {
+        provider: this.name,
+        httpStatus: res.status,
+        raw: res.data,
+      });
+    }
+    return { provider: this.name, status: "pending", reference: referenceId, raw: res.data };
+  }
+
+  async verifyPayout(reference: string): Promise<Payout> {
+    const res = await request(this.name, this.options, `${this.baseUrl}/disbursement/v1_0/transfer/${encodeURIComponent(reference)}`, {
+      method: "GET",
+      headers: await this.headers("disbursement"),
+    });
+    if (res.status === 404) throw new PesewaError("not_found", `MTN MoMo: no transfer ${reference}`, { provider: this.name, httpStatus: 404 });
+    if (res.status !== 200) {
+      throw new PesewaError("provider_error", `MTN MoMo: transfer status check failed (HTTP ${res.status})`, {
+        provider: this.name,
+        httpStatus: res.status,
+        raw: res.data,
+      });
+    }
+    const data = asRecord(res.data);
+    const status = data.status === "SUCCESSFUL" ? "success" : data.status === "PENDING" ? "pending" : "failed";
+    const reason = asRecord(data.reason).message ?? data.reason;
+    return {
+      provider: this.name,
+      reference,
+      status,
+      amount: data.amount !== undefined ? fromMajor(String(data.amount)) : undefined,
+      currency: typeof data.currency === "string" ? data.currency : undefined,
+      providerTransactionId: typeof data.financialTransactionId === "string" ? data.financialTransactionId : undefined,
+      failureReason: status === "failed" && typeof reason === "string" ? reason : undefined,
+      raw: data,
+    };
+  }
+
+  /** Payout callbacks (marked in the callback URL), confirmed with MTN. Collection callbacks return null. */
+  async handlePayoutWebhook(req: WebhookRequest): Promise<Payout | null> {
+    const { reference, kind } = this.callbackReference(req);
+    return kind === "payout" ? this.verifyPayout(reference) : null;
   }
 
   /**
